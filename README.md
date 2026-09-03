@@ -51,7 +51,6 @@ No additional login or API keys required. `pi-antigravity-usage` automatically u
 | Command | Description |
 |---|---|
 | `/antigravity` | Show visual progress bars, remaining %, and reset countdowns |
-| `/antigravity-usage` | Alias for `/antigravity` |
 
 ### Command Output Example
 

@@ -590,13 +590,8 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
     }
   };
 
-  pi.registerCommand("antigravity-usage", {
-    description: "Show Google Antigravity subscription usage and remaining limits",
-    handler: async (_args, ctx) => showUsageDialog(ctx),
-  });
-
   pi.registerCommand("antigravity", {
-    description: "Show Google Antigravity subscription usage (alias for /antigravity-usage)",
+    description: "Show Google Antigravity subscription usage and remaining limits",
     handler: async (_args, ctx) => showUsageDialog(ctx),
   });
 
