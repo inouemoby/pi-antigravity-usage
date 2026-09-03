@@ -22,7 +22,7 @@
   "homepage": "https://github.com/inouemoby/pi-antigravity-usage",
   "pi": {
     "extensions": [
-      "./dist/index.js"
+      "./index.ts"
     ]
   },
   "scripts": {
