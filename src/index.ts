@@ -2,7 +2,6 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { refreshAntigravityToken } from "@cortexkit/antigravity-auth-core";
-import { Type } from "typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -595,42 +594,4 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
     handler: async (_args, ctx) => showUsageDialog(ctx),
   });
 
-  // ── Tool antigravity_usage ─────────────────────────────────
-  pi.registerTool({
-    name: "antigravity_usage",
-    label: "Antigravity Usage",
-    description: "Get current Google Antigravity / Google AI plan quota and usage status.",
-    parameters: Type.Object({}),
-    async execute() {
-      try {
-        const d = await getUsage();
-        const formatBucket = (b?: QuotaBucket) =>
-          b ? {
-            usedPercent: b.usedPercent,
-            remainingPercent: b.remainingPercent,
-            resetsIn: b.resetsIn,
-            resetTime: new Date(b.resetMs).toISOString(),
-          } : null;
-
-        const result = {
-          gemini: d.gemini ? {
-            fiveHour: formatBucket(d.gemini.fiveHour),
-            weekly: formatBucket(d.gemini.weekly),
-          } : null,
-          claudeAndGpt: d.claudeGpt ? {
-            fiveHour: formatBucket(d.claudeGpt.fiveHour),
-            weekly: formatBucket(d.claudeGpt.weekly),
-          } : null,
-          refreshedAt: new Date(d._ts).toISOString(),
-        };
-
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-          details: result,
-        };
-      } catch (err: any) {
-        return { content: [{ type: "text", text: `Error: ${err.message}` }], details: undefined as any, isError: true };
-      }
-    },
-  });
 }
