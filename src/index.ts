@@ -603,7 +603,7 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
     trigger();
   });
 
-  // ── Slash Command /antigravity-usage & /antigravity ─────────
+  // ── Slash Command /antigravity ────────────────────────────────
   const showUsageDialog = async (ctx: any) => {
     try {
       const d = await getUsage(true);
@@ -652,13 +652,9 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
     }
   };
 
-  const usageCommand = {
+  pi.registerCommand("antigravity", {
     description: "Show Google Antigravity subscription usage and remaining limits",
-    handler: async (_args: string, ctx: any) => showUsageDialog(ctx),
-  };
-  pi.registerCommand("antigravity", usageCommand);
-  // Keep the original command name working for existing muscle memory and
-  // sessions; both names deliberately use the same single refresh path.
-  pi.registerCommand("antigravity-usage", usageCommand);
+    handler: async (_args, ctx) => showUsageDialog(ctx),
+  });
 
 }

@@ -2,7 +2,7 @@
 
 Google Antigravity / Google AI plan subscription usage monitor extension for [Pi coding agent](https://pi.dev).
 
-Displays real-time Google Antigravity 5-hour rolling limits and weekly quota in Pi's footer. Also provides the `/antigravity` and `/antigravity-usage` commands for instant quota inspection.
+Displays real-time Google Antigravity 5-hour rolling limits and weekly quota in Pi's footer. Also provides the `/antigravity` command for instant quota inspection.
 
 ## Features
 
@@ -10,7 +10,7 @@ Displays real-time Google Antigravity 5-hour rolling limits and weekly quota in 
 - **Smart Pool Detection**: Automatically tracks the active model's quota pool:
   - **Gemini Pool**: Gemini 3.8 Flash, 3.7 Flash, 3.6 Flash, 3.1 Pro, etc.
   - **Claude & GPT Pool**: Claude Sonnet 4.6, Claude Opus 4.6, GPT-OSS 120B.
-- **Usage Commands**: `/antigravity` and `/antigravity-usage` show a visual progress bar chart with exact usage, remaining quota %, and human-readable countdowns to reset.
+- **`/antigravity` Command**: Shows a visual progress bar chart with exact usage, remaining quota %, and human-readable countdowns to reset.
 - **Auto-Activate & Auto-Vacate**: Only mounts when using `google-antigravity` provider models; automatically vacates the footer when switching to other providers (e.g. Codex or Ollama) so other usage plugins take over seamlessly.
 - **Zero Config**: Reads existing OAuth credentials directly from Pi's `auth.json` (configured via [pi-antigravity](https://github.com/inouemoby/pi-antigravity)). Refreshes expired access tokens automatically.
 
