@@ -13,8 +13,11 @@ const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const REFRESH_MARGIN_MS = 60 * 1000;
 
+// Consumer Antigravity accounts use the daily consumer gateway. The
+// cloudcode-pa.googleapis.com endpoint can return a different/stale quota
+// view (or an enterprise view), so it must not be preferred for this plugin.
 const ENDPOINTS = [
-  "https://cloudcode-pa.googleapis.com",
+  "https://daily-cloudcode-pa.googleapis.com",
   "https://daily-cloudcode-pa.sandbox.googleapis.com",
 ];
 
