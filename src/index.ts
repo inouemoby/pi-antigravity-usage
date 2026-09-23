@@ -301,6 +301,7 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
   let usageError: string | null = null;
   let usagePromise: Promise<AntigravityUsageData> | null = null;
   let footerOn = false;
+  let footerGeneration = 0;
   let _tui: any = null;
   let latestCtx: any = null;
   let agentBusy = false;
@@ -333,12 +334,12 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
     return usagePromise;
   }
 
+  function requestRenderSafe(tui: any): void {
+    try { tui?.requestRender?.(); } catch { /* footer may already be disposed */ }
+  }
+
   function trigger() {
-    setTimeout(() => {
-      try {
-        _tui?.requestRender?.();
-      } catch { /* footer unmounted */ }
-    }, 0);
+    setTimeout(() => requestRenderSafe(_tui), 0);
   }
 
   async function refresh(ctx: any) {
@@ -358,9 +359,9 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
     }
   }
 
-  function toggleFooter(ctx: any) {
+  function toggleFooter(ctx: any, force = false) {
     if (isAntigravity(ctx) && readAuth()) {
-      if (!footerOn) {
+      if (!footerOn || force) {
         ctx.ui.setFooter(buildFooter(ctx));
         footerOn = true;
       }
@@ -374,15 +375,20 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
   }
 
   function buildFooter(ctx: any) {
+    const generation = ++footerGeneration;
     return (tui: any, theme: any, fd: any) => {
       _tui = tui;
-      const unsub = fd.onBranchChange(() => tui.requestRender());
+      const unsub = fd.onBranchChange(() => {
+        if (generation === footerGeneration) requestRenderSafe(tui);
+      });
 
       return {
         dispose: () => {
-          unsub();
-          _tui = null;
-          footerOn = false;
+          try { unsub(); } catch { /* already disposed */ }
+          if (generation === footerGeneration) {
+            _tui = null;
+            footerOn = false;
+          }
         },
         invalidate() {},
         render(width: number): string[] {
@@ -566,13 +572,14 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
     latestCtx = ctx;
     thinkingLevel = pi.getThinkingLevel?.() || "off";
     footerOn = false;
-    toggleFooter(ctx);
+    toggleFooter(ctx, true);
     if (readAuth()) refresh(ctx);
     startIdleTimer();
   });
 
   pi.on("session_shutdown", async () => {
     stopIdleTimer();
+    latestCtx = null;
   });
 
   pi.on("agent_start", async (_e, ctx) => {
@@ -591,8 +598,12 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
     if (isAntigravity(ctx)) {
       // Allow previous provider's footer unmount to finish first
       setTimeout(() => {
-        toggleFooter(ctx);
-        if (readAuth()) refresh(ctx);
+        const currentCtx = latestCtx;
+        if (!currentCtx || !isAntigravity(currentCtx)) return;
+        try {
+          toggleFooter(currentCtx, true);
+          if (readAuth()) refresh(currentCtx);
+        } catch { /* session or footer was disposed */ }
       }, 0);
     } else {
       // Vacate immediately so the new provider can mount its footer
