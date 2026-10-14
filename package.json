@@ -1,6 +1,6 @@
 {
   "name": "pi-antigravity-usage",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Google Antigravity subscription usage monitor for Pi coding agent. Displays 5-hour rolling limit and weekly quota in the footer, matching Pi's native footer experience.",
   "type": "module",
   "license": "MIT",
@@ -27,23 +27,24 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/bundle.mjs",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types test/*.test.ts"
   },
   "dependencies": {
-    "@cortexkit/antigravity-auth-core": "^2.2.0",
-    "esbuild": "^0.27.7"
+    "@cortexkit/antigravity-auth-core": "3.0.3"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": ">=1.2.0",
+    "@earendil-works/pi-coding-agent": ">=1.2.0",
+    "@earendil-works/pi-tui": ">=1.2.0",
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.84.4",
-    "@earendil-works/pi-coding-agent": "^0.84.4",
-    "@earendil-works/pi-tui": "^0.84.4",
+    "@earendil-works/pi-ai": "1.2.0",
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@earendil-works/pi-tui": "1.2.0",
     "@types/node": "^22.15.3",
+    "esbuild": "0.28.2",
     "typebox": "^1.0.86",
     "typescript": "^5.9.0"
   }

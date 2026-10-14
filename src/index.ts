@@ -1,9 +1,9 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { refreshAntigravityToken } from "@cortexkit/antigravity-auth-core";
-import * as fs from "node:fs";
-import * as path from "node:path";
+import type { OAuthCredentials } from "@earendil-works/pi-ai";
+import { fetchAntigravityUsage, quotaAccount, type AntigravityUsageData } from "./usage.ts";
+export type { QuotaBucket, QuotaGroup, AntigravityUsageData } from "./usage.ts";
 
 // ─── Constants ───────────────────────────────────────────────────
 const PROVIDER_ID = "google-antigravity";
@@ -11,60 +11,6 @@ const CACHE_MS = 60_000;
 const IDLE_REFRESH_MS = 5 * 60 * 1000;
 const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-const REFRESH_MARGIN_MS = 60 * 1000;
-
-// Consumer Antigravity accounts use the daily consumer gateway. The
-// cloudcode-pa.googleapis.com endpoint can return a different/stale quota
-// view (or an enterprise view), so it must not be preferred for this plugin.
-const ENDPOINTS = [
-  "https://daily-cloudcode-pa.googleapis.com",
-  "https://daily-cloudcode-pa.sandbox.googleapis.com",
-];
-
-// ─── Types ───────────────────────────────────────────────────────
-export interface QuotaBucket {
-  window: "5h" | "weekly" | string;
-  usedPercent: number;
-  remainingPercent: number;
-  resetMs: number;
-  resetsIn: string;
-}
-
-export interface QuotaGroup {
-  displayName: string;
-  key: "gemini" | "claudeGpt";
-  fiveHour?: QuotaBucket;
-  weekly?: QuotaBucket;
-}
-
-export interface AntigravityUsageData {
-  email?: string;
-  gemini?: QuotaGroup;
-  claudeGpt?: QuotaGroup;
-  rawDescription?: string;
-  _ts: number;
-}
-
-interface StoredAuth {
-  type: string;
-  access?: string;
-  refresh?: string;
-  expires?: number;
-  email?: string;
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────
-function humanDuration(untilMs: number): string {
-  if (untilMs <= 0) return "now";
-  const m = Math.floor(untilMs / 60000);
-  const d = Math.floor(m / 1440);
-  const h = Math.floor((m % 1440) / 60);
-  const mins = m % 60;
-  if (d > 0) return `${d}d ${h}h`;
-  if (h > 0) return `${h}h ${mins}m`;
-  return `${mins}m`;
-}
-
 function formatTokens(count: number): string {
   if (count < 1000) return String(count);
   if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
@@ -86,217 +32,17 @@ function usageSeverity(usedPct: number, windowMs: number, resetMs: number): numb
   return 0;
 }
 
-// ─── Auth Resolution & Token Refresh ─────────────────────────────
-function getPiAuthPath(): string {
-  const home = process.env.PI_CODING_AGENT_DIR
-    || path.join(process.env.USERPROFILE || process.env.HOME || ".", ".pi/agent");
-  return path.resolve(home, "auth.json");
-}
-
-function readAuth(): StoredAuth | null {
-  try {
-    const cred = readStoredCredential(PROVIDER_ID);
-    if (cred?.type === "oauth" && cred.access && cred.refresh) {
-      return cred as StoredAuth;
-    }
-  } catch { /* fall through */ }
-
-  try {
-    const p = getPiAuthPath();
-    if (fs.existsSync(p)) {
-      const all = JSON.parse(fs.readFileSync(p, "utf-8"));
-      const cred = all[PROVIDER_ID];
-      if (cred?.type === "oauth" && cred.access && cred.refresh) {
-        return cred as StoredAuth;
-      }
-    }
-  } catch { /* ignore */ }
-  return null;
-}
-
-function writeBackAuth(cred: StoredAuth): void {
-  try {
-    const p = getPiAuthPath();
-    if (!fs.existsSync(p)) return;
-    const all = JSON.parse(fs.readFileSync(p, "utf-8"));
-    all[PROVIDER_ID] = {
-      ...all[PROVIDER_ID],
-      ...cred,
-    };
-    const tmp = p + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(all, null, 2), "utf-8");
-    fs.renameSync(tmp, p);
-  } catch { /* ignore */ }
-}
-
-let _refreshPromise: Promise<StoredAuth> | null = null;
-async function ensureFreshAuth(cred: StoredAuth): Promise<StoredAuth> {
-  const now = Date.now();
-  const expires = cred.expires ?? 0;
-  if (expires > 0 && now < expires - REFRESH_MARGIN_MS) {
-    return cred;
-  }
-
-  if (_refreshPromise) return _refreshPromise;
-
-  _refreshPromise = (async () => {
-    try {
-      const refreshStr = cred.refresh || "";
-      const rawRefresh = refreshStr.split("|")[0];
-      if (!rawRefresh) return cred;
-
-      const next = await refreshAntigravityToken(rawRefresh);
-      const suffix = refreshStr.includes("|")
-        ? refreshStr.slice(refreshStr.indexOf("|"))
-        : "";
-      const updated: StoredAuth = {
-        ...cred,
-        access: next.access,
-        refresh: `${next.refresh}${suffix}`,
-        expires: next.expires,
-      };
-      writeBackAuth(updated);
-      return updated;
-    } finally {
-      _refreshPromise = null;
-    }
-  })();
-
-  return _refreshPromise;
-}
-
-// ─── Quota API Fetcher ───────────────────────────────────────────
-function parseBucket(b: any): QuotaBucket | undefined {
-  if (!b || typeof b !== "object") return undefined;
-
-  // Google has used both the explicit `window` field and bucket IDs such as
-  // `gemini-5h`/`3p-weekly`. Accept both so a harmless API schema change does
-  // not make the footer silently disappear.
-  const hint = `${String(b.window || "")} ${String(b.bucketId || "")} ${String(b.displayName || "")}`.toLowerCase();
-  const window = /5h|five\s*hour|5\s*hour/.test(hint)
-    ? "5h"
-    : /weekly|week/.test(hint)
-      ? "weekly"
-      : String(b.window || "");
-
-  let remainingFraction: number | undefined;
-  if (typeof b.remainingFraction === "number") remainingFraction = b.remainingFraction;
-  else if (typeof b.remainingPercent === "number") remainingFraction = b.remainingPercent / 100;
-  else if (typeof b.remainingPercentage === "number") remainingFraction = b.remainingPercentage / 100;
-  if (remainingFraction === undefined || !Number.isFinite(remainingFraction) || !window) return undefined;
-
-  remainingFraction = Math.max(0, Math.min(1, remainingFraction));
-  const remainingPercent = +(remainingFraction * 100).toFixed(1);
-  const usedPercent = +((1 - remainingFraction) * 100).toFixed(1);
-  const resetValue = b.resetTime ?? b.resetAt ?? b.reset;
-  const resetMs = resetValue ? new Date(resetValue).getTime() : 0;
-  return {
-    window,
-    usedPercent,
-    remainingPercent,
-    resetMs: Number.isFinite(resetMs) ? resetMs : 0,
-    resetsIn: resetMs > 0 ? humanDuration(resetMs - Date.now()) : "unknown",
-  };
-}
-
-function quotaHeaders(access: string): Record<string, string> {
-  return {
-    Authorization: `Bearer ${access}`,
-    "Content-Type": "application/json",
-    "User-Agent": "antigravity/cli/1.1.24 (aidev_client; os_type=windows; arch=amd64; cl=974782877; auth_method=consumer)",
-    "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-    "Client-Metadata": JSON.stringify({ ideType: "ANTIGRAVITY" }),
-  };
-}
-
-async function fetchAntigravityUsage(): Promise<AntigravityUsageData> {
-  const rawCred = readAuth();
-  if (!rawCred?.access) {
-    throw new Error("No Google Antigravity credentials found. Run /login to authenticate.");
-  }
-
-  let cred = await ensureFreshAuth(rawCred);
-  const project = (cred.refresh || "").split("|")[1] || "aicode-consumers";
-  let retriedAfterUnauthorized = false;
-  let lastError: Error | undefined;
-
-  for (const endpoint of ENDPOINTS) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const res = await fetch(`${endpoint}/v1internal:retrieveUserQuotaSummary`, {
-          method: "POST",
-          headers: quotaHeaders(cred.access || ""),
-          body: JSON.stringify({ project }),
-          signal: AbortSignal.timeout(8000),
-        });
-
-        if (res.status === 401 && !retriedAfterUnauthorized && cred.refresh) {
-          // The stored expiry can outlive Google's token expiry. Refresh once
-          // and retry the same endpoint instead of leaving a blank footer.
-          retriedAfterUnauthorized = true;
-          cred = await ensureFreshAuth({ ...cred, expires: 0 });
-          continue;
-        }
-        if (!res.ok) {
-          lastError = new Error(`HTTP ${res.status}: ${await res.text().catch(() => "")}`);
-          break;
-        }
-
-        const data = (await res.json()) as any;
-        if (!Array.isArray(data.groups)) {
-          throw new Error("Google returned an invalid Antigravity quota response");
-        }
-
-        let geminiGroup: QuotaGroup | undefined;
-        let claudeGptGroup: QuotaGroup | undefined;
-
-        for (const g of data.groups) {
-          const name = String(g.displayName || g.name || "");
-          const description = String(g.description || "");
-          const bucketHints = (Array.isArray(g.buckets) ? g.buckets : [])
-            .map((b: any) => `${b?.bucketId || ""} ${b?.displayName || ""}`)
-            .join(" ");
-          const groupHint = `${name} ${description} ${bucketHints}`;
-          const isGemini = /gemini/i.test(groupHint);
-          const isClaudeGpt = /claude|gpt|3p/i.test(groupHint);
-          const group: QuotaGroup = {
-            displayName: name,
-            key: isClaudeGpt ? "claudeGpt" : "gemini",
-          };
-
-          for (const b of Array.isArray(g.buckets) ? g.buckets : []) {
-            const parsed = parseBucket(b);
-            if (!parsed) continue;
-            if (parsed.window === "5h") group.fiveHour = parsed;
-            else if (parsed.window === "weekly") group.weekly = parsed;
-          }
-
-          if (isClaudeGpt) claudeGptGroup = group;
-          else if (isGemini) geminiGroup = group;
-        }
-
-        if (!geminiGroup && !claudeGptGroup) {
-          throw new Error("Google returned no recognizable Antigravity quota groups");
-        }
-        return {
-          email: cred.email,
-          gemini: geminiGroup,
-          claudeGpt: claudeGptGroup,
-          rawDescription: data.description,
-          _ts: Date.now(),
-        };
-      } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err));
-        break;
-      }
-    }
-  }
-
-  throw lastError || new Error("Failed to fetch Antigravity quota from Google");
+// Authentication is resolved through Pi; this extension never writes auth.json.
+function readAuth(): OAuthCredentials | null {
+  const credential = readStoredCredential(PROVIDER_ID);
+  return credential?.type === "oauth" ? credential : null;
 }
 
 // ─── Main Plugin Definition ──────────────────────────────────────
 export default function piAntigravityUsage(pi: ExtensionAPI): void {
+  const lifetime = new AbortController();
+  let usageAccount: string | undefined;
+  let pendingAccount: string | undefined;
   let usage: AntigravityUsageData | null = null;
   let usageError: string | null = null;
   let usagePromise: Promise<AntigravityUsageData> | null = null;
@@ -319,19 +65,27 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
   }
 
   async function getUsage(force = false): Promise<AntigravityUsageData> {
-    if (!force && usage && Date.now() - usage._ts < CACHE_MS) {
-      return usage;
-    }
-    if (usagePromise) return usagePromise;
-    usagePromise = fetchAntigravityUsage()
-      .then((data) => {
-        usage = data;
-        return data;
-      })
-      .finally(() => {
-        usagePromise = null;
-      });
-    return usagePromise;
+    if (process.env.PI_OFFLINE !== undefined) throw new Error("Quota refresh is disabled in Pi offline mode");
+    const account = quotaAccount(readAuth());
+    if (!account) throw new Error("No Antigravity account/project; use /login google-antigravity");
+    if (account !== usageAccount) { usage = null; usageError = null; usageAccount = account; }
+    if (!force && usage && Date.now() - usage._ts < CACHE_MS) return usage;
+    if (usagePromise && pendingAccount === account) return usagePromise;
+    const requestCtx = latestCtx;
+    if (!requestCtx?.modelRegistry) throw new Error("Pi model registry is unavailable");
+    const promise = fetchAntigravityUsage(async () => {
+      const resolved = await requestCtx.modelRegistry.getProviderAuth(PROVIDER_ID);
+      const credential = readAuth();
+      if (!resolved?.auth.apiKey || !credential || credential.access !== resolved.auth.apiKey || quotaAccount(credential) !== account) {
+        throw new Error("Antigravity account changed or is unavailable; retry after signing in");
+      }
+      return credential;
+    }, lifetime.signal).then(data => {
+      if (quotaAccount(readAuth()) !== account) throw new Error("Antigravity account changed during quota refresh");
+      usage = data; return data;
+    }).finally(() => { if (usagePromise === promise) usagePromise = null; });
+    pendingAccount = account; usagePromise = promise;
+    return promise;
   }
 
   function requestRenderSafe(tui: any): void {
@@ -360,6 +114,7 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
   }
 
   function toggleFooter(ctx: any, force = false) {
+    if (ctx?.mode !== "tui") return;
     if (isAntigravity(ctx) && readAuth()) {
       if (!footerOn || force) {
         ctx.ui.setFooter(buildFooter(ctx));
@@ -455,6 +210,7 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
           let usageNoPrefix = "";
           let usageIdx = -1;
 
+          if (usageError && usage) parts.push("AG:? (stale)");
           if (usage) {
             const pool = getActivePool(ctx.model?.id);
             const grp = pool === "claudeGpt" ? usage.claudeGpt : usage.gemini;
@@ -548,6 +304,7 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
   // ── Idle Timer ─────────────────────────────────────────────
   function startIdleTimer() {
     stopIdleTimer();
+    if (latestCtx?.mode !== "tui" || process.env.PI_OFFLINE !== undefined) return;
     idleTimer = setInterval(async () => {
       if (agentBusy) return;
       const ctx = latestCtx;
@@ -555,7 +312,7 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
       try {
         await getUsage();
         trigger();
-      } catch { /* silent */ }
+      } catch (error) { usageError = error instanceof Error ? error.message : String(error); trigger(); }
     }, IDLE_REFRESH_MS);
     (idleTimer as any).unref?.();
   }
@@ -578,6 +335,7 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async () => {
+    lifetime.abort();
     stopIdleTimer();
     latestCtx = null;
   });
@@ -620,6 +378,7 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
   // ── Slash Command /antigravity ────────────────────────────────
   const showUsageDialog = async (ctx: any) => {
     try {
+      latestCtx = ctx;
       const d = await getUsage(true);
       usageError = null;
       trigger();

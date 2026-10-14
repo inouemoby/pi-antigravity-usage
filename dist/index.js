@@ -1,30 +1,85 @@
 // src/index.ts
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { refreshAntigravityToken } from "@cortexkit/antigravity-auth-core";
-import { Type } from "typebox";
-import * as fs from "node:fs";
-import * as path from "node:path";
+
+// src/usage.ts
+import { ANTIGRAVITY_ENDPOINT, buildAntigravityHarnessBootstrapHeaders, buildAntigravityLoadCodeAssistMetadata, parseRefreshParts, redactCredentialText } from "@cortexkit/antigravity-auth-core";
+var record = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+var humanDuration = (ms) => {
+  if (ms <= 0) return "now";
+  const m = Math.floor(ms / 6e4), d = Math.floor(m / 1440), h = Math.floor(m % 1440 / 60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m % 60}m` : `${m}m`;
+};
+function quotaAccount(cred) {
+  if (!cred) return;
+  const parts = parseRefreshParts(cred.refresh);
+  const project = parts.managedProjectId || parts.projectId;
+  const email = typeof cred.email === "string" ? cred.email.toLowerCase() : void 0;
+  return project ? `${email ? `${email}|` : ""}${project}` : email;
+}
+function parseBucket(raw) {
+  if (!record(raw)) return;
+  const hint = `${raw.window ?? ""} ${raw.bucketId ?? ""} ${raw.displayName ?? ""}`.toLowerCase();
+  const window = /5h|five\s*hour|5\s*hour/.test(hint) ? "5h" : /weekly|week/.test(hint) ? "weekly" : String(raw.window ?? "");
+  const fraction = typeof raw.remainingFraction === "number" ? raw.remainingFraction : typeof raw.remainingPercent === "number" ? raw.remainingPercent / 100 : typeof raw.remainingPercentage === "number" ? raw.remainingPercentage / 100 : void 0;
+  if (fraction === void 0 || !Number.isFinite(fraction) || !window) return;
+  const remaining = Math.max(0, Math.min(1, fraction));
+  const reset = raw.resetTime ?? raw.resetAt ?? raw.reset;
+  const resetMs = typeof reset === "string" || typeof reset === "number" ? new Date(reset).getTime() : 0;
+  return { window, usedPercent: +((1 - remaining) * 100).toFixed(1), remainingPercent: +(remaining * 100).toFixed(1), resetMs: Number.isFinite(resetMs) ? resetMs : 0, resetsIn: resetMs ? humanDuration(resetMs - Date.now()) : "unknown" };
+}
+function parseQuota(payload, email) {
+  if (!record(payload) || !Array.isArray(payload.groups)) throw new Error("Google returned an invalid Antigravity quota response");
+  const data = { email, _ts: Date.now() };
+  for (const raw of payload.groups) {
+    if (!record(raw)) continue;
+    const buckets = Array.isArray(raw.buckets) ? raw.buckets : [];
+    const name = String(raw.displayName ?? raw.name ?? "");
+    const hint = `${name} ${raw.description ?? ""} ${buckets.filter(record).map((b) => `${b.bucketId ?? ""} ${b.displayName ?? ""}`).join(" ")}`;
+    const key = /claude|gpt|3p/i.test(hint) ? "claudeGpt" : /gemini/i.test(hint) ? "gemini" : void 0;
+    if (!key) continue;
+    const group = { displayName: name, key };
+    for (const b of buckets) {
+      const parsed = parseBucket(b);
+      if (parsed?.window === "5h") group.fiveHour = parsed;
+      if (parsed?.window === "weekly") group.weekly = parsed;
+    }
+    if (group.fiveHour || group.weekly) data[key] = group;
+  }
+  if (!data.gemini && !data.claudeGpt) throw new Error("Google returned no recognizable Antigravity quota buckets");
+  if (typeof payload.description === "string") data.rawDescription = payload.description;
+  return data;
+}
+async function fetchAntigravityUsage(resolveAuth, signal, fetcher = fetch) {
+  signal.throwIfAborted();
+  const credential = await resolveAuth();
+  signal.throwIfAborted();
+  const parts = parseRefreshParts(credential.refresh);
+  const project = parts.managedProjectId || parts.projectId;
+  if (!project || !credential.access) throw new Error("Missing Antigravity login/project; use /login google-antigravity");
+  try {
+    const response = await fetcher(`${ANTIGRAVITY_ENDPOINT}/v1internal:retrieveUserQuotaSummary`, {
+      method: "POST",
+      headers: { ...buildAntigravityHarnessBootstrapHeaders(credential.access), "Content-Type": "application/json", "Client-Metadata": JSON.stringify(buildAntigravityLoadCodeAssistMetadata()) },
+      body: JSON.stringify({ project }),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(8e3)])
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(response.status === 401 ? "Google rejected the current sign-in; use /login google-antigravity" : `Antigravity quota HTTP ${response.status}`);
+    }
+    return parseQuota(await response.json(), typeof credential.email === "string" ? credential.email : void 0);
+  } catch (error) {
+    throw new Error(redactCredentialText(error instanceof Error ? error.message : String(error), [credential.access, credential.refresh, parts.refreshToken]));
+  }
+}
+
+// src/index.ts
 var PROVIDER_ID = "google-antigravity";
 var CACHE_MS = 6e4;
 var IDLE_REFRESH_MS = 5 * 60 * 1e3;
 var FIVE_HOUR_MS = 5 * 60 * 60 * 1e3;
 var WEEK_MS = 7 * 24 * 60 * 60 * 1e3;
-var REFRESH_MARGIN_MS = 60 * 1e3;
-var ENDPOINTS = [
-  "https://cloudcode-pa.googleapis.com",
-  "https://daily-cloudcode-pa.sandbox.googleapis.com"
-];
-function humanDuration(untilMs) {
-  if (untilMs <= 0) return "now";
-  const m = Math.floor(untilMs / 6e4);
-  const d = Math.floor(m / 1440);
-  const h = Math.floor(m % 1440 / 60);
-  const mins = m % 60;
-  if (d > 0) return `${d}d ${h}h`;
-  if (h > 0) return `${h}h ${mins}m`;
-  return `${mins}m`;
-}
 function formatTokens(count) {
   if (count < 1e3) return String(count);
   if (count < 1e4) return `${(count / 1e3).toFixed(1)}k`;
@@ -43,154 +98,19 @@ function usageSeverity(usedPct, windowMs, resetMs) {
   if (usedPct > expectedPct) return 1;
   return 0;
 }
-function getPiAuthPath() {
-  const home = process.env.PI_CODING_AGENT_DIR || path.join(process.env.USERPROFILE || process.env.HOME || ".", ".pi/agent");
-  return path.resolve(home, "auth.json");
-}
 function readAuth() {
-  try {
-    const cred = readStoredCredential(PROVIDER_ID);
-    if (cred?.type === "oauth" && cred.access && cred.refresh) {
-      return cred;
-    }
-  } catch {
-  }
-  try {
-    const p = getPiAuthPath();
-    if (fs.existsSync(p)) {
-      const all = JSON.parse(fs.readFileSync(p, "utf-8"));
-      const cred = all[PROVIDER_ID];
-      if (cred?.type === "oauth" && cred.access && cred.refresh) {
-        return cred;
-      }
-    }
-  } catch {
-  }
-  return null;
-}
-function writeBackAuth(cred) {
-  try {
-    const p = getPiAuthPath();
-    if (!fs.existsSync(p)) return;
-    const all = JSON.parse(fs.readFileSync(p, "utf-8"));
-    all[PROVIDER_ID] = {
-      ...all[PROVIDER_ID],
-      ...cred
-    };
-    const tmp = p + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(all, null, 2), "utf-8");
-    fs.renameSync(tmp, p);
-  } catch {
-  }
-}
-var _refreshPromise = null;
-async function ensureFreshAuth(cred) {
-  const now = Date.now();
-  const expires = cred.expires ?? 0;
-  if (expires > 0 && now < expires - REFRESH_MARGIN_MS) {
-    return cred;
-  }
-  if (_refreshPromise) return _refreshPromise;
-  _refreshPromise = (async () => {
-    try {
-      const refreshStr = cred.refresh || "";
-      const rawRefresh = refreshStr.split("|")[0];
-      if (!rawRefresh) return cred;
-      const next = await refreshAntigravityToken(rawRefresh);
-      const suffix = refreshStr.includes("|") ? refreshStr.slice(refreshStr.indexOf("|")) : "";
-      const updated = {
-        ...cred,
-        access: next.access,
-        refresh: `${next.refresh}${suffix}`,
-        expires: next.expires
-      };
-      writeBackAuth(updated);
-      return updated;
-    } finally {
-      _refreshPromise = null;
-    }
-  })();
-  return _refreshPromise;
-}
-function parseBucket(b) {
-  if (!b || typeof b.remainingFraction !== "number") return void 0;
-  const remainingFraction = Math.max(0, Math.min(1, b.remainingFraction));
-  const remainingPercent = +(remainingFraction * 100).toFixed(1);
-  const usedPercent = +((1 - remainingFraction) * 100).toFixed(1);
-  const resetMs = b.resetTime ? new Date(b.resetTime).getTime() : 0;
-  const window = b.window === "5h" ? "5h" : b.window === "weekly" ? "weekly" : String(b.window || "");
-  return {
-    window,
-    usedPercent,
-    remainingPercent,
-    resetMs,
-    resetsIn: resetMs > 0 ? humanDuration(resetMs - Date.now()) : "unknown"
-  };
-}
-async function fetchAntigravityUsage() {
-  const rawCred = readAuth();
-  if (!rawCred || !rawCred.access || !rawCred.refresh) {
-    throw new Error("No Google Antigravity credentials found. Run /login to authenticate.");
-  }
-  const cred = await ensureFreshAuth(rawCred);
-  const project = (cred.refresh || "").split("|")[1] || "aicode-consumers";
-  const headers = {
-    Authorization: `Bearer ${cred.access}`,
-    "Content-Type": "application/json",
-    "User-Agent": "antigravity/cli/1.1.24 (aidev_client; os_type=windows; arch=amd64; cl=974782877; auth_method=consumer)",
-    "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-    "Client-Metadata": JSON.stringify({ ideType: "ANTIGRAVITY" })
-  };
-  let lastError;
-  for (const endpoint of ENDPOINTS) {
-    try {
-      const res = await fetch(`${endpoint}/v1internal:retrieveUserQuotaSummary`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ project }),
-        signal: AbortSignal.timeout(8e3)
-      });
-      if (!res.ok) {
-        lastError = new Error(`HTTP ${res.status}: ${await res.text().catch(() => "")}`);
-        continue;
-      }
-      const data = await res.json();
-      let geminiGroup;
-      let claudeGptGroup;
-      for (const g of data.groups || []) {
-        const name = String(g.displayName || "");
-        const isGemini = /gemini/i.test(name) || /gemini/i.test(String(g.description || ""));
-        const isClaudeGpt = /claude|gpt|3p/i.test(name) || /claude|gpt/i.test(String(g.description || ""));
-        const group = {
-          displayName: name,
-          key: isClaudeGpt ? "claudeGpt" : "gemini"
-        };
-        for (const b of g.buckets || []) {
-          const parsed = parseBucket(b);
-          if (!parsed) continue;
-          if (parsed.window === "5h") group.fiveHour = parsed;
-          else if (parsed.window === "weekly") group.weekly = parsed;
-        }
-        if (isClaudeGpt) claudeGptGroup = group;
-        else if (isGemini) geminiGroup = group;
-      }
-      return {
-        email: cred.email,
-        gemini: geminiGroup,
-        claudeGpt: claudeGptGroup,
-        rawDescription: data.description,
-        _ts: Date.now()
-      };
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-    }
-  }
-  throw lastError || new Error("Failed to fetch Antigravity quota from Google");
+  const credential = readStoredCredential(PROVIDER_ID);
+  return credential?.type === "oauth" ? credential : null;
 }
 function piAntigravityUsage(pi) {
+  const lifetime = new AbortController();
+  let usageAccount;
+  let pendingAccount;
   let usage = null;
+  let usageError = null;
   let usagePromise = null;
   let footerOn = false;
+  let footerGeneration = 0;
   let _tui = null;
   let latestCtx = null;
   let agentBusy = false;
@@ -205,43 +125,65 @@ function piAntigravityUsage(pi) {
     return "gemini";
   }
   async function getUsage(force = false) {
-    if (!force && usage && Date.now() - usage._ts < CACHE_MS) {
-      return usage;
+    if (process.env.PI_OFFLINE !== void 0) throw new Error("Quota refresh is disabled in Pi offline mode");
+    const account = quotaAccount(readAuth());
+    if (!account) throw new Error("No Antigravity account/project; use /login google-antigravity");
+    if (account !== usageAccount) {
+      usage = null;
+      usageError = null;
+      usageAccount = account;
     }
-    if (usagePromise) return usagePromise;
-    usagePromise = fetchAntigravityUsage().then((data) => {
+    if (!force && usage && Date.now() - usage._ts < CACHE_MS) return usage;
+    if (usagePromise && pendingAccount === account) return usagePromise;
+    const requestCtx = latestCtx;
+    if (!requestCtx?.modelRegistry) throw new Error("Pi model registry is unavailable");
+    const promise = fetchAntigravityUsage(async () => {
+      const resolved = await requestCtx.modelRegistry.getProviderAuth(PROVIDER_ID);
+      const credential = readAuth();
+      if (!resolved?.auth.apiKey || !credential || credential.access !== resolved.auth.apiKey || quotaAccount(credential) !== account) {
+        throw new Error("Antigravity account changed or is unavailable; retry after signing in");
+      }
+      return credential;
+    }, lifetime.signal).then((data) => {
+      if (quotaAccount(readAuth()) !== account) throw new Error("Antigravity account changed during quota refresh");
       usage = data;
       return data;
     }).finally(() => {
-      usagePromise = null;
+      if (usagePromise === promise) usagePromise = null;
     });
-    return usagePromise;
+    pendingAccount = account;
+    usagePromise = promise;
+    return promise;
+  }
+  function requestRenderSafe(tui) {
+    try {
+      tui?.requestRender?.();
+    } catch {
+    }
   }
   function trigger() {
-    setTimeout(() => {
-      try {
-        _tui?.requestRender?.();
-      } catch {
-      }
-    }, 0);
+    setTimeout(() => requestRenderSafe(_tui), 0);
   }
   async function refresh(ctx) {
     if (!isAntigravity(ctx)) {
-      if (usage) {
-        usage = null;
-        toggleFooter(ctx);
-      }
+      usage = null;
+      usageError = null;
+      toggleFooter(ctx);
       return;
     }
     try {
       await getUsage();
+      usageError = null;
       trigger();
-    } catch {
+    } catch (err) {
+      usageError = err instanceof Error ? err.message : String(err);
+      trigger();
     }
   }
-  function toggleFooter(ctx) {
+  function toggleFooter(ctx, force = false) {
+    if (ctx?.mode !== "tui") return;
     if (isAntigravity(ctx) && readAuth()) {
-      if (!footerOn) {
+      if (!footerOn || force) {
         ctx.ui.setFooter(buildFooter(ctx));
         footerOn = true;
       }
@@ -254,14 +196,22 @@ function piAntigravityUsage(pi) {
     }
   }
   function buildFooter(ctx) {
+    const generation = ++footerGeneration;
     return (tui, theme, fd) => {
       _tui = tui;
-      const unsub = fd.onBranchChange(() => tui.requestRender());
+      const unsub = fd.onBranchChange(() => {
+        if (generation === footerGeneration) requestRenderSafe(tui);
+      });
       return {
         dispose: () => {
-          unsub();
-          _tui = null;
-          footerOn = false;
+          try {
+            unsub();
+          } catch {
+          }
+          if (generation === footerGeneration) {
+            _tui = null;
+            footerOn = false;
+          }
         },
         invalidate() {
         },
@@ -318,6 +268,7 @@ function piAntigravityUsage(pi) {
           let usageFull = "";
           let usageNoPrefix = "";
           let usageIdx = -1;
+          if (usageError && usage) parts.push("AG:? (stale)");
           if (usage) {
             const pool = getActivePool(ctx.model?.id);
             const grp = pool === "claudeGpt" ? usage.claudeGpt : usage.gemini;
@@ -339,8 +290,23 @@ function piAntigravityUsage(pi) {
                 usageNoPrefix = uParts.join(" ");
                 usageIdx = parts.length;
                 parts.push(usageFull);
+              } else if (usageError) {
+                usageIdx = parts.length;
+                usageFull = "AG:?";
+                usageNoPrefix = usageFull;
+                parts.push(usageFull);
               }
+            } else if (usageError) {
+              usageIdx = parts.length;
+              usageFull = "AG:?";
+              usageNoPrefix = usageFull;
+              parts.push(usageFull);
             }
+          } else if (usageError) {
+            usageIdx = parts.length;
+            usageFull = "AG:?";
+            usageNoPrefix = usageFull;
+            parts.push(usageFull);
           }
           let left = parts.join(" ");
           const m = ctx.model;
@@ -384,6 +350,7 @@ function piAntigravityUsage(pi) {
   }
   function startIdleTimer() {
     stopIdleTimer();
+    if (latestCtx?.mode !== "tui" || process.env.PI_OFFLINE !== void 0) return;
     idleTimer = setInterval(async () => {
       if (agentBusy) return;
       const ctx = latestCtx;
@@ -391,7 +358,9 @@ function piAntigravityUsage(pi) {
       try {
         await getUsage();
         trigger();
-      } catch {
+      } catch (error) {
+        usageError = error instanceof Error ? error.message : String(error);
+        trigger();
       }
     }, IDLE_REFRESH_MS);
     idleTimer.unref?.();
@@ -406,12 +375,14 @@ function piAntigravityUsage(pi) {
     latestCtx = ctx;
     thinkingLevel = pi.getThinkingLevel?.() || "off";
     footerOn = false;
-    toggleFooter(ctx);
+    toggleFooter(ctx, true);
     if (readAuth()) refresh(ctx);
     startIdleTimer();
   });
   pi.on("session_shutdown", async () => {
+    lifetime.abort();
     stopIdleTimer();
+    latestCtx = null;
   });
   pi.on("agent_start", async (_e, ctx) => {
     latestCtx = ctx;
@@ -426,8 +397,13 @@ function piAntigravityUsage(pi) {
     latestCtx = ctx;
     if (isAntigravity(ctx)) {
       setTimeout(() => {
-        toggleFooter(ctx);
-        if (readAuth()) refresh(ctx);
+        const currentCtx = latestCtx;
+        if (!currentCtx || !isAntigravity(currentCtx)) return;
+        try {
+          toggleFooter(currentCtx, true);
+          if (readAuth()) refresh(currentCtx);
+        } catch {
+        }
       }, 0);
     } else {
       toggleFooter(ctx);
@@ -440,7 +416,10 @@ function piAntigravityUsage(pi) {
   });
   const showUsageDialog = async (ctx) => {
     try {
+      latestCtx = ctx;
       const d = await getUsage(true);
+      usageError = null;
+      trigger();
       const bar = (pct) => {
         const p = Math.max(0, Math.min(100, pct));
         const filled = Math.round(p / 5);
@@ -482,40 +461,6 @@ function piAntigravityUsage(pi) {
   pi.registerCommand("antigravity", {
     description: "Show Google Antigravity subscription usage and remaining limits",
     handler: async (_args, ctx) => showUsageDialog(ctx)
-  });
-  pi.registerTool({
-    name: "antigravity_usage",
-    label: "Antigravity Usage",
-    description: "Get current Google Antigravity / Google AI plan quota and usage status.",
-    parameters: Type.Object({}),
-    async execute() {
-      try {
-        const d = await getUsage();
-        const formatBucket = (b) => b ? {
-          usedPercent: b.usedPercent,
-          remainingPercent: b.remainingPercent,
-          resetsIn: b.resetsIn,
-          resetTime: new Date(b.resetMs).toISOString()
-        } : null;
-        const result = {
-          gemini: d.gemini ? {
-            fiveHour: formatBucket(d.gemini.fiveHour),
-            weekly: formatBucket(d.gemini.weekly)
-          } : null,
-          claudeAndGpt: d.claudeGpt ? {
-            fiveHour: formatBucket(d.claudeGpt.fiveHour),
-            weekly: formatBucket(d.claudeGpt.weekly)
-          } : null,
-          refreshedAt: new Date(d._ts).toISOString()
-        };
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-          details: result
-        };
-      } catch (err) {
-        return { content: [{ type: "text", text: `Error: ${err.message}` }], details: void 0, isError: true };
-      }
-    }
   });
 }
 export {
