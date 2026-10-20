@@ -43,7 +43,7 @@ No additional login or API keys required. `pi-antigravity-usage` automatically u
 
 - Normal = consumption within expected burn rate
 - `!` = consumption above expected pace for the current reset window
-- `!!` = consumption exceeds 1.5× expected pace or quota exhausted
+- `!!` = consumption exceeds 1.5× expected pace
 
 ## Commands
 

@@ -26,7 +26,6 @@ function usageSeverity(usedPct: number, windowMs: number, resetMs: number): numb
   const elapsedRatio = elapsedMs / windowMs;
   const expectedPct = elapsedRatio * 100;
 
-  if (usedPct >= 100) return 2;
   if (usedPct > expectedPct * 1.5) return 2;
   if (usedPct > expectedPct) return 1;
   return 0;
