@@ -176,10 +176,11 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
 
           const parts: string[] = [];
           const cachePartIndexes: number[] = [];
+          const tokenPartIndexes: number[] = [];
           let costPartIndex = -1;
 
-          if (ti) parts.push(`↑${formatTokens(ti)}`);
-          if (to) parts.push(`↓${formatTokens(to)}`);
+          if (ti) { tokenPartIndexes.push(parts.length); parts.push(`↑${formatTokens(ti)}`); }
+          if (to) { tokenPartIndexes.push(parts.length); parts.push(`↓${formatTokens(to)}`); }
           if (tr) {
             cachePartIndexes.push(parts.length);
             parts.push(`R${formatTokens(tr)}`);
@@ -265,7 +266,7 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
           const withProvider = m ? `(${m.provider}) ${modelText}` : modelText;
           let right = withProvider;
 
-          // Responsive degradation
+          // 省略顺序 (与 pi-codex-usage 一致): 供应商名 → 额度前缀 → 缓存计数 → 费用 → 累计 token
           if (visibleWidth(left) + 2 + visibleWidth(right) > width) {
             right = modelText;
           }
@@ -281,6 +282,11 @@ export default function piAntigravityUsage(pi: ExtensionAPI): void {
           }
           if (!fits() && costPartIndex >= 0) {
             parts[costPartIndex] = "";
+            left = parts.filter(Boolean).join(" ");
+          }
+          // 累计 token 是最后一个可省略的统计项
+          if (!fits() && tokenPartIndexes.length > 0) {
+            for (const idx of tokenPartIndexes) parts[idx] = "";
             left = parts.filter(Boolean).join(" ");
           }
 
