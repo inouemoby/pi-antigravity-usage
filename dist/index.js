@@ -77,7 +77,7 @@ async function fetchAntigravityUsage(resolveAuth, signal, fetcher = fetch) {
 // src/index.ts
 var PROVIDER_ID = "google-antigravity";
 var CACHE_MS = 6e4;
-var IDLE_REFRESH_MS = 5 * 60 * 1e3;
+var IDLE_REFRESH_MS = 30 * 60 * 1e3;
 var FIVE_HOUR_MS = 5 * 60 * 60 * 1e3;
 var WEEK_MS = 7 * 24 * 60 * 60 * 1e3;
 function formatTokens(count) {
@@ -93,7 +93,6 @@ function usageSeverity(usedPct, windowMs, resetMs) {
   const elapsedMs = Math.max(0, windowMs - remainingMs);
   const elapsedRatio = elapsedMs / windowMs;
   const expectedPct = elapsedRatio * 100;
-  if (usedPct >= 100) return 2;
   if (usedPct > expectedPct * 1.5) return 2;
   if (usedPct > expectedPct) return 1;
   return 0;
@@ -103,6 +102,7 @@ function readAuth() {
   return credential?.type === "oauth" ? credential : null;
 }
 function piAntigravityUsage(pi) {
+  let lastPublishedFooterUsage = "";
   const lifetime = new AbortController();
   let usageAccount;
   let pendingAccount;
@@ -224,7 +224,15 @@ function piAntigravityUsage(pi) {
           if (branch) pwd += ` (${branch})`;
           const sname = sm?.getSessionName?.();
           if (sname) pwd += ` \u2022 ${sname}`;
-          const ln1 = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
+          const statusText = [...fd?.getExtensionStatuses?.()?.values?.() ?? []].filter(Boolean).join("  ");
+          const statusWidth = statusText ? visibleWidth(statusText) : 0;
+          let ln1;
+          if (statusWidth && statusWidth + 12 <= width) {
+            const left2 = truncateToWidth(theme.fg("dim", pwd), width - statusWidth - 2, theme.fg("dim", "..."));
+            ln1 = left2 + " ".repeat(Math.max(2, width - visibleWidth(left2) - statusWidth)) + theme.fg("dim", statusText);
+          } else {
+            ln1 = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
+          }
           let ti = 0, to = 0, tr = 0, tw = 0, tc = 0;
           for (const e of sm?.getEntries?.() || []) {
             if (e.type === "message" && e.message?.role === "assistant") {
@@ -240,9 +248,16 @@ function piAntigravityUsage(pi) {
           }
           const parts = [];
           const cachePartIndexes = [];
+          const tokenPartIndexes = [];
           let costPartIndex = -1;
-          if (ti) parts.push(`\u2191${formatTokens(ti)}`);
-          if (to) parts.push(`\u2193${formatTokens(to)}`);
+          if (ti) {
+            tokenPartIndexes.push(parts.length);
+            parts.push(`\u2191${formatTokens(ti)}`);
+          }
+          if (to) {
+            tokenPartIndexes.push(parts.length);
+            parts.push(`\u2193${formatTokens(to)}`);
+          }
           if (tr) {
             cachePartIndexes.push(parts.length);
             parts.push(`R${formatTokens(tr)}`);
@@ -333,6 +348,10 @@ function piAntigravityUsage(pi) {
             parts[costPartIndex] = "";
             left = parts.filter(Boolean).join(" ");
           }
+          if (!fits() && tokenPartIndexes.length > 0) {
+            for (const idx of tokenPartIndexes) parts[idx] = "";
+            left = parts.filter(Boolean).join(" ");
+          }
           const lw = visibleWidth(left);
           const rw = visibleWidth(right);
           let ln2;
@@ -342,6 +361,10 @@ function piAntigravityUsage(pi) {
             ln2 = truncateToWidth(left + "  " + right, width, "");
           } else {
             ln2 = truncateToWidth(left, width, "...");
+          }
+          if (ln2 !== lastPublishedFooterUsage) {
+            lastPublishedFooterUsage = ln2;
+            pi.events.emit("pi-footer:usage", { source: "pi-antigravity-usage", text: ln2 });
           }
           return [ln1, theme.fg("dim", ln2)];
         }
@@ -392,6 +415,16 @@ function piAntigravityUsage(pi) {
     latestCtx = ctx;
     agentBusy = false;
     if (readAuth()) refresh(ctx);
+  });
+  let lastMidRefreshAt = 0;
+  pi.on("message_end", async (event, ctx) => {
+    latestCtx = ctx;
+    if (event?.message?.role !== "assistant") return;
+    if (!isAntigravity(ctx) || !readAuth()) return;
+    const now = Date.now();
+    if (now - lastMidRefreshAt < CACHE_MS) return;
+    lastMidRefreshAt = now;
+    refresh(ctx);
   });
   pi.on("model_select", async (_e, ctx) => {
     latestCtx = ctx;
